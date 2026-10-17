@@ -1,0 +1,84 @@
+name: Build Pi Agent APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  JAVA_VERSION: "17"
+
+jobs:
+  build:
+    name: Build Pi Agent APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Set up JDK (no cache — disk budget)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Restore signing material from secrets
+        env:
+          PI_KEYSTORE_B64: ${{ secrets.PI_KEYSTORE_B64 }}
+          PI_STORE_PASSWORD: ${{ secrets.PI_STORE_PASSWORD }}
+          PI_KEY_ALIAS: ${{ secrets.PI_KEY_ALIAS }}
+          PI_KEY_PASSWORD: ${{ secrets.PI_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          cd src/android
+          echo "$PI_KEYSTORE_B64" | base64 -d > pi-release.keystore
+          cat > signing.properties <<EOF
+          signing.storeFile=pi-release.keystore
+          signing.storePassword=${PI_STORE_PASSWORD}
+          signing.keyAlias=${PI_KEY_ALIAS}
+          signing.keyPassword=${PI_KEY_PASSWORD}
+          EOF
+          ls -lh pi-release.keystore
+
+      - name: Reassemble split rootfs asset
+        run: |
+          set -euo pipefail
+          cd src/android/app/src/main/assets
+          cat ubuntu-base.tar.gz.part-*.part > ubuntu-base.tar.gz
+          rm ubuntu-base.tar.gz.part-*.part
+          ls -lh ubuntu-base.tar.gz
+
+      - name: Build release APK
+        env:
+          GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx6g -XX:MaxMetaspaceSize=1g"
+        run: |
+          set -euo pipefail
+          cd src/android
+          # The committed gradle.properties is tuned DOWN for on-phone builds
+          # (2g gradle, 1 worker). CI runners have 7g RAM: raise both.
+          sed -i 's|org.gradle.jvmargs=.*|org.gradle.jvmargs=-Xmx5g -Dfile.encoding=UTF-8|' gradle.properties
+          sed -i 's|kotlin.daemon.jvmargs=.*|kotlin.daemon.jvmargs=-Xmx5g|' gradle.properties
+          sed -i 's|org.gradle.workers.max=.*|org.gradle.workers.max=2|' gradle.properties
+          ./gradlew :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Collect APK
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          APK=src/android/app/build/outputs/apk/release/app-release.apk
+          test -s "$APK"
+          cp "$APK" "dist/piagent-com.piagent.apk"
+          ls -lh dist/
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: piagent-apk
+          path: dist/*.apk
+          retention-days: 14
