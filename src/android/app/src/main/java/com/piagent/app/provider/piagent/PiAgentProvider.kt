@@ -33,9 +33,30 @@ import org.json.JSONObject
 class PiAgentProvider(
     private val appContext: Context?,
     override var model: LLMModel,
+    /** [piagent-engine] pi is the ONLY engine — the app-side provider
+     * instance (base URL / key / model) is synced into pi's models.json
+     * before every prompt and pi drives the whole loop. */
+    private val piProviderId: String = "app",
+    private val displayName: String = "App Provider",
+    private val baseUrl: String = "",
+    private val apiKey: String? = null,
+    private val apiType: String = "openai",
 ) : LLMProvider {
 
     override val name: String = "pi"
+
+    /** Sync the instance into pi's config and point pi at the model.
+     * Idempotent; called before every send so edited keys/URLs take effect
+     * immediately without an app restart. */
+    private suspend fun ensurePiConfig() {
+        val ctx = appContext ?: return
+        if (baseUrl.isBlank()) return
+        com.piagent.sandbox.piengine.PiEngine.syncProviderConfig(
+            ctx, piProviderId, displayName, baseUrl, apiKey, apiType, model.id,
+        )
+        com.piagent.sandbox.piengine.PiEngine.boot(ctx)
+        com.piagent.sandbox.piengine.PiEngine.setModel(piProviderId, model.id)
+    }
 
     override suspend fun sendMessageClamped(
         messages: List<LLMMessage>,
@@ -71,6 +92,9 @@ class PiAgentProvider(
         tools: List<AgentToolDefinition>,
         thinkingLevel: ThinkingLevel,
     ): Flow<LLMStreamChunk> = flow {
+        // [piagent-engine] pi is the only engine: sync config, point pi at
+        // this instance's model, then send the prompt through the RPC bridge.
+        ensurePiConfig()
         val ctx = appContext ?: throw IllegalStateException("PiAgentProvider requires a context")
         PiEngine.boot(ctx)
 

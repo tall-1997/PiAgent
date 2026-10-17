@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.File
@@ -175,6 +176,67 @@ object PiEngine {
             w.flush()
         }
         return id
+    }
+
+    /**
+     * [piagent-engine] Sync one provider's connection config into pi's
+     * models.json inside the rootfs. pi is the ONLY engine: every app-side
+     * provider entry becomes a pi provider entry; [setModel] then points pi
+     * at it before the prompt. Replace-or-append by id, so re-syncing on
+     * every send is idempotent and picks up edited keys/URLs immediately.
+     */
+    suspend fun syncProviderConfig(
+        context: Context,
+        piProviderId: String,
+        displayName: String,
+        baseUrl: String,
+        apiKey: String?,
+        apiType: String,
+        modelId: String,
+    ) {
+        val rootfs = RootfsManager.getInstance(context).rootfsDir
+        val cfgFile = File(rootfs, "root/.pi/agent/models.json")
+        cfgFile.parentFile?.mkdirs()
+        val cfg = if (cfgFile.isFile) {
+            runCatching { JSONObject(cfgFile.readText()) }.getOrNull() ?: JSONObject()
+        } else JSONObject()
+        val providers = cfg.optJSONArray("providers") ?: JSONArray().also { cfg.put("providers", it) }
+        var replaced = false
+        for (i in 0 until providers.length()) {
+            val p = providers.optJSONObject(i) ?: continue
+            if (p.optString("id") == piProviderId) {
+                p.put("name", displayName)
+                p.put("baseUrl", baseUrl)
+                p.put("apiKey", apiKey ?: "")
+                p.put("api", apiType)
+                p.put("defaultModel", modelId)
+                val models = p.optJSONArray("models") ?: JSONArray().also { p.put("models", it) }
+                var hasModel = false
+                for (m in 0 until models.length()) {
+                    if (models.optJSONObject(m)?.optString("id") == modelId) hasModel = true
+                }
+                if (!hasModel) models.put(JSONObject().put("id", modelId).put("name", modelId))
+                replaced = true
+            }
+        }
+        if (!replaced) {
+            providers.put(JSONObject().apply {
+                put("id", piProviderId)
+                put("name", displayName)
+                put("baseUrl", baseUrl)
+                put("apiKey", apiKey ?: "")
+                put("api", apiType)
+                put("models", JSONArray().put(JSONObject().put("id", modelId).put("name", modelId)))
+                put("defaultModel", modelId)
+            })
+        }
+        cfgFile.writeText(cfg.toString())
+        Log.i(TAG, "pi models.json synced: $piProviderId -> $modelId")
+    }
+
+    /** Point pi at one provider/model before prompting. */
+    suspend fun setModel(providerId: String, modelId: String) {
+        call("set_model", JSONObject().put("provider", providerId).put("model", modelId))
     }
 
     /** RPC call with no streaming side effects (set_model etc.). */
